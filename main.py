@@ -20,7 +20,7 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DOWNLOAD_FOLDER = "downloads"
 BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8000')
 PORT = int(os.environ.get('PORT', 8000))
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB limit for free hosting
+MAX_FILE_SIZE = 2048 * 1024 * 1024  # 20MB limit for free hosting
 
 class TelegramDownloadBot:
     def __init__(self):
