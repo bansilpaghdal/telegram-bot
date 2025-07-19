@@ -266,8 +266,10 @@ if __name__ == "__main__":
     print(f"Token exists: {'BOT_TOKEN' in os.environ}")
     print(f"Token length: {len(token_raw)}")
     print(f"Token preview: {token_raw[:15] if token_raw else 'EMPTY'}...")
-    print(f"Has newlines: {'\\n' in token_raw}")
-    print(f"Has spaces: {' ' in token_raw}")
+    newline_check = '\n' in token_raw
+    space_check = ' ' in token_raw
+    print(f"Has newlines: {newline_check}")
+    print(f"Has spaces: {space_check}")
     print("==================")
     
     if not BOT_TOKEN:
