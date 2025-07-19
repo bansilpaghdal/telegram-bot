@@ -20,7 +20,7 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN')
 DOWNLOAD_FOLDER = "downloads"
 BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8000')
 PORT = int(os.environ.get('PORT', 8000))
-MAX_FILE_SIZE = 2000 * 1024 * 1024  # 20MB limit for free hosting
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB limit for free hosting
 
 class TelegramDownloadBot:
     def __init__(self):
@@ -82,12 +82,8 @@ class TelegramDownloadBot:
             safe_filename = f"{timestamp}_{file_hash}_{filename}"
             file_path = os.path.join(DOWNLOAD_FOLDER, safe_filename)
             
-            # Download file
-            file_data = await file_obj.download_as_bytearray()
-            
-            # Save file asynchronously
-            async with aiofiles.open(file_path, 'wb') as f:
-                await f.write(file_data)
+            # Download file using the correct method
+            await file_obj.download_to_drive(file_path)
             
             return file_path, safe_filename
         except Exception as e:
@@ -109,7 +105,7 @@ class TelegramDownloadBot:
         """Process any file type"""
         try:
             # Check file size
-            if file_size > MAX_FILE_SIZE:
+            if file_size and file_size > MAX_FILE_SIZE:
                 await update.message.reply_text(
                     f"❌ File too large! Maximum size: {MAX_FILE_SIZE // (1024*1024)}MB"
                 )
@@ -118,8 +114,11 @@ class TelegramDownloadBot:
             # Send processing message
             processing_msg = await update.message.reply_text("⏳ Processing your file...")
             
+            # Get the actual file object from Telegram
+            telegram_file = await file_obj.get_file()
+            
             # Download file
-            file_path, safe_filename = await self.download_file(file_obj, original_filename)
+            file_path, safe_filename = await self.download_file(telegram_file, original_filename)
             
             if not file_path:
                 await processing_msg.edit_text("❌ Failed to download file. Please try again.")
@@ -130,10 +129,11 @@ class TelegramDownloadBot:
             download_url = f"{BASE_URL}/download/{encoded_filename}"
             
             # Create response message
+            size_str = self.format_file_size(file_size) if file_size else "Unknown size"
             response_message = (
                 f"✅ File processed successfully!\n\n"
                 f"📄 **File:** `{original_filename}`\n"
-                f"📊 **Size:** {self.format_file_size(file_size)}\n"
+                f"📊 **Size:** {size_str}\n"
                 f"🔗 **Direct Link:** [Download Here]({download_url})\n\n"
                 f"💡 *Click the link for faster download*"
             )
@@ -260,8 +260,18 @@ async def run_web_server():
 
 # Main execution
 if __name__ == "__main__":
+    # Debug token
+    print("=== TOKEN DEBUG ===")
+    token_raw = os.environ.get('BOT_TOKEN', '')
+    print(f"Token exists: {'BOT_TOKEN' in os.environ}")
+    print(f"Token length: {len(token_raw)}")
+    print(f"Token preview: {token_raw[:15] if token_raw else 'EMPTY'}...")
+    print(f"Has newlines: {'\\n' in token_raw}")
+    print(f"Has spaces: {' ' in token_raw}")
+    print("==================")
+    
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN environment variable not set!")
+        logger.error("BOT_TOKEN environment variable not set or invalid!")
         exit(1)
     
     # Create bot instance
