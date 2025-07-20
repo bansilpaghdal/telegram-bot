@@ -1,13 +1,17 @@
 import os
 import logging
 import asyncio
+import tempfile
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
-import aiohttp
-import aiofiles
-from urllib.parse import quote
 import hashlib
 import time
+from urllib.parse import quote
+import json
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import io
 
 # Configure logging
 logging.basicConfig(
@@ -15,23 +19,109 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-DOWNLOAD_FOLDER = "downloads"
-BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8000')
-PORT = int(os.environ.get('PORT', 8000))
-MAX_FILE_SIZE = 2048 * 1024 * 1024  # 20MB limit for free hosting
+# Configuration from environment variables
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
+MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2000MB limit (Google Drive can handle more)
 
-class TelegramDownloadBot:
+# Google Drive configuration
+GDRIVE_FOLDER_ID = os.environ.get('GDRIVE_FOLDER_ID', '')  # Optional: specific folder
+GOOGLE_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS', '')  # Service account JSON
+
+# Validate bot token
+if BOT_TOKEN and not BOT_TOKEN.replace(':', '').replace('-', '').replace('_', '').isalnum():
+    logger.error(f"Invalid BOT_TOKEN format. Token contains invalid characters.")
+    BOT_TOKEN = None
+
+class GoogleDriveManager:
+    def __init__(self):
+        self.service = None
+        self.setup_drive_service()
+    
+    def setup_drive_service(self):
+        """Initialize Google Drive service"""
+        try:
+            if not GOOGLE_CREDENTIALS:
+                logger.error("GOOGLE_CREDENTIALS not found in environment variables")
+                return
+            
+            # Parse credentials from environment variable
+            credentials_info = json.loads(GOOGLE_CREDENTIALS)
+            credentials = service_account.Credentials.from_service_account_info(
+                credentials_info,
+                scopes=['https://www.googleapis.com/auth/drive.file']
+            )
+            
+            self.service = build('drive', 'v3', credentials=credentials)
+            logger.info("Google Drive service initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Google Drive service: {e}")
+    
+    async def upload_file(self, file_path, filename, mime_type='application/octet-stream'):
+        """Upload file to Google Drive"""
+        try:
+            if not self.service:
+                logger.error("Google Drive service not available")
+                return None
+            
+            # File metadata
+            file_metadata = {
+                'name': filename,
+                'parents': [GDRIVE_FOLDER_ID] if GDRIVE_FOLDER_ID else None
+            }
+            
+            # Remove None values
+            file_metadata = {k: v for k, v in file_metadata.items() if v is not None}
+            
+            # Upload file
+            media = MediaFileUpload(file_path, mimetype=mime_type, resumable=True)
+            
+            # Execute upload in a thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, 
+                lambda: self.service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id,name,webViewLink,webContentLink'
+                ).execute()
+            )
+            
+            # Make file publicly accessible
+            await loop.run_in_executor(
+                None,
+                lambda: self.service.permissions().create(
+                    fileId=result['id'],
+                    body={'role': 'reader', 'type': 'anyone'}
+                ).execute()
+            )
+            
+            # Generate direct download link
+            file_id = result['id']
+            direct_link = f"https://drive.google.com/uc?export=download&id={file_id}"
+            
+            return {
+                'file_id': file_id,
+                'name': result['name'],
+                'view_link': result['webViewLink'],
+                'direct_link': direct_link
+            }
+            
+        except Exception as e:
+            logger.error(f"Error uploading to Google Drive: {e}")
+            return None
+    
+    def get_mime_type(self, filename):
+        """Get MIME type from filename"""
+        import mimetypes
+        mime_type, _ = mimetypes.guess_type(filename)
+        return mime_type or 'application/octet-stream'
+
+class TelegramGDriveBot:
     def __init__(self):
         self.app = Application.builder().token(BOT_TOKEN).build()
+        self.drive_manager = GoogleDriveManager()
         self.setup_handlers()
-        self.ensure_download_folder()
-    
-    def ensure_download_folder(self):
-        """Create downloads folder if it doesn't exist"""
-        if not os.path.exists(DOWNLOAD_FOLDER):
-            os.makedirs(DOWNLOAD_FOLDER)
     
     def setup_handlers(self):
         """Setup bot command and message handlers"""
@@ -46,11 +136,12 @@ class TelegramDownloadBot:
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command"""
         welcome_message = (
-            "🚀 Welcome to Fast Download Bot!\n\n"
-            "📤 Forward any file to me and I'll provide:\n"
-            "• Direct download link\n"
-            "• Faster download speeds\n"
-            "• File information\n\n"
+            "🚀 Welcome to Google Drive Upload Bot!\n\n"
+            "📤 Forward any file to me and I'll:\n"
+            "• Upload to Google Drive\n"
+            "• Provide direct download link\n"
+            "• No storage limitations!\n"
+            "• Keep files safe in cloud\n\n"
             "Supported files: Documents, Photos, Videos, Audio, Voice messages\n"
             f"Max file size: {MAX_FILE_SIZE // (1024*1024)}MB"
         )
@@ -61,37 +152,64 @@ class TelegramDownloadBot:
         help_message = (
             "📋 How to use this bot:\n\n"
             "1. Forward any file to this bot\n"
-            "2. Wait for processing\n"
-            "3. Get your direct download link\n\n"
+            "2. Bot uploads to Google Drive\n"
+            "3. Get direct download link\n\n"
             "Features:\n"
-            "• Fast direct downloads\n"
-            "• File information display\n"
-            "• Support for all file types\n\n"
+            "• Unlimited cloud storage\n"
+            "• Fast Google Drive downloads\n"
+            "• Public sharing links\n"
+            "• File backup in cloud\n\n"
             "Commands:\n"
             "/start - Start the bot\n"
             "/help - Show this help message"
         )
         await update.message.reply_text(help_message)
     
-    async def download_file(self, file_obj, filename):
-        """Download file from Telegram servers"""
+    async def download_and_upload(self, file_obj, original_filename):
+        """Download from Telegram and upload to Google Drive"""
+        temp_file = None
         try:
-            # Generate unique filename to avoid conflicts
+            # Generate unique filename
             timestamp = str(int(time.time()))
-            file_hash = hashlib.md5(filename.encode()).hexdigest()[:8]
-            safe_filename = f"{timestamp}_{file_hash}_{filename}"
-            file_path = os.path.join(DOWNLOAD_FOLDER, safe_filename)
+            file_hash = hashlib.md5(original_filename.encode()).hexdigest()[:8]
+            safe_filename = f"{timestamp}_{file_hash}_{original_filename}"
             
-            # Download file using the correct method
-            await file_obj.download_to_drive(file_path)
+            # Create temporary file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{safe_filename}")
+            temp_path = temp_file.name
+            temp_file.close()
             
-            return file_path, safe_filename
+            # Get Telegram file and download
+            telegram_file = await file_obj.get_file()
+            await telegram_file.download_to_drive(temp_path)
+            
+            # Get MIME type
+            mime_type = self.drive_manager.get_mime_type(original_filename)
+            
+            # Upload to Google Drive
+            drive_result = await self.drive_manager.upload_file(
+                temp_path, 
+                original_filename,  # Use original filename for Drive
+                mime_type
+            )
+            
+            return drive_result
+            
         except Exception as e:
-            logger.error(f"Error downloading file: {e}")
-            return None, None
+            logger.error(f"Error in download_and_upload: {e}")
+            return None
+        finally:
+            # Clean up temporary file
+            if temp_file and os.path.exists(temp_file.name):
+                try:
+                    os.unlink(temp_file.name)
+                except:
+                    pass
     
     def format_file_size(self, size_bytes):
         """Format file size in human readable format"""
+        if not size_bytes:
+            return "Unknown size"
         if size_bytes < 1024:
             return f"{size_bytes} B"
         elif size_bytes < 1024**2:
@@ -104,6 +222,13 @@ class TelegramDownloadBot:
     async def process_file(self, update: Update, file_obj, original_filename, file_size):
         """Process any file type"""
         try:
+            # Check if Google Drive is available
+            if not self.drive_manager.service:
+                await update.message.reply_text(
+                    "❌ Google Drive not configured. Please contact administrator."
+                )
+                return
+            
             # Check file size
             if file_size and file_size > MAX_FILE_SIZE:
                 await update.message.reply_text(
@@ -112,30 +237,29 @@ class TelegramDownloadBot:
                 return
             
             # Send processing message
-            processing_msg = await update.message.reply_text("⏳ Processing your file...")
+            processing_msg = await update.message.reply_text(
+                "⏳ Downloading and uploading to Google Drive..."
+            )
             
-            # Get the actual file object from Telegram
-            telegram_file = await file_obj.get_file()
+            # Download and upload to Google Drive
+            drive_result = await self.download_and_upload(file_obj, original_filename)
             
-            # Download file
-            file_path, safe_filename = await self.download_file(telegram_file, original_filename)
-            
-            if not file_path:
-                await processing_msg.edit_text("❌ Failed to download file. Please try again.")
+            if not drive_result:
+                await processing_msg.edit_text(
+                    "❌ Failed to upload file to Google Drive. Please try again."
+                )
                 return
             
-            # Generate download URL
-            encoded_filename = quote(safe_filename)
-            download_url = f"{BASE_URL}/download/{encoded_filename}"
-            
-            # Create response message
+            # Create response message with multiple link options
             size_str = self.format_file_size(file_size) if file_size else "Unknown size"
             response_message = (
-                f"✅ File processed successfully!\n\n"
+                f"✅ File uploaded to Google Drive!\n\n"
                 f"📄 **File:** `{original_filename}`\n"
                 f"📊 **Size:** {size_str}\n"
-                f"🔗 **Direct Link:** [Download Here]({download_url})\n\n"
-                f"💡 *Click the link for faster download*"
+                f"☁️ **Cloud Storage:** Google Drive\n\n"
+                f"🔗 **Direct Download:** [Click Here]({drive_result['direct_link']})\n"
+                f"👀 **View in Drive:** [Open in Browser]({drive_result['view_link']})\n\n"
+                f"💡 *Files are stored permanently in Google Drive*"
             )
             
             await processing_msg.edit_text(
@@ -146,7 +270,9 @@ class TelegramDownloadBot:
             
         except Exception as e:
             logger.error(f"Error processing file: {e}")
-            await update.message.reply_text("❌ An error occurred while processing your file.")
+            await update.message.reply_text(
+                "❌ An error occurred while processing your file."
+            )
     
     async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle document files"""
@@ -188,75 +314,8 @@ class TelegramDownloadBot:
     
     def run(self):
         """Start the bot"""
-        logger.info("Starting Telegram Download Bot...")
+        logger.info("Starting Telegram Google Drive Bot...")
         self.app.run_polling()
-
-# HTTP Server for serving files
-from aiohttp import web, hdrs
-import mimetypes
-
-async def download_handler(request):
-    """Handle file download requests"""
-    filename = request.match_info['filename']
-    file_path = os.path.join(DOWNLOAD_FOLDER, filename)
-    
-    if not os.path.exists(file_path):
-        return web.Response(status=404, text="File not found")
-    
-    # Determine content type
-    content_type, _ = mimetypes.guess_type(filename)
-    if not content_type:
-        content_type = 'application/octet-stream'
-    
-    # Set headers for faster download
-    headers = {
-        hdrs.CONTENT_TYPE: content_type,
-        hdrs.CONTENT_DISPOSITION: f'attachment; filename="{filename}"',
-        hdrs.ACCEPT_RANGES: 'bytes',
-        hdrs.CACHE_CONTROL: 'no-cache',
-    }
-    
-    # Support range requests for resume capability
-    file_size = os.path.getsize(file_path)
-    range_header = request.headers.get('Range')
-    
-    if range_header:
-        # Parse range header
-        range_match = range_header.replace('bytes=', '').split('-')
-        start = int(range_match[0]) if range_match[0] else 0
-        end = int(range_match[1]) if range_match[1] else file_size - 1
-        
-        headers[hdrs.CONTENT_RANGE] = f'bytes {start}-{end}/{file_size}'
-        headers[hdrs.CONTENT_LENGTH] = str(end - start + 1)
-        
-        return web.FileResponse(
-            file_path,
-            status=206,
-            headers=headers,
-            chunk_size=8192
-        )
-    else:
-        headers[hdrs.CONTENT_LENGTH] = str(file_size)
-        return web.FileResponse(file_path, headers=headers, chunk_size=8192)
-
-async def create_web_server():
-    """Create and configure web server"""
-    app = web.Application()
-    app.router.add_get('/download/{filename}', download_handler)
-    return app
-
-async def run_web_server():
-    """Run the web server"""
-    app = await create_web_server()
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)  # Bind to all interfaces
-    await site.start()
-    logger.info(f"Web server started on port {PORT}")
-    
-    # Keep server running
-    while True:
-        await asyncio.sleep(3600)
 
 # Main execution
 if __name__ == "__main__":
@@ -266,34 +325,22 @@ if __name__ == "__main__":
     print(f"Token exists: {'BOT_TOKEN' in os.environ}")
     print(f"Token length: {len(token_raw)}")
     print(f"Token preview: {token_raw[:15] if token_raw else 'EMPTY'}...")
-    newline_check = '\n' in token_raw
-    space_check = ' ' in token_raw
-    print(f"Has newlines: {newline_check}")
-    print(f"Has spaces: {space_check}")
+    print(f"GDrive credentials: {'GOOGLE_CREDENTIALS' in os.environ}")
     print("==================")
     
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN environment variable not set or invalid!")
         exit(1)
     
-    # Create bot instance
-    bot = TelegramDownloadBot()
+    if not GOOGLE_CREDENTIALS:
+        logger.error("GOOGLE_CREDENTIALS not set! Please configure Google Drive API.")
+        exit(1)
     
-    # Start web server and bot concurrently
-    async def main():
-        # Start web server
-        server_task = asyncio.create_task(run_web_server())
-        
-        # Start bot
-        await bot.app.initialize()
-        await bot.app.start()
-        await bot.app.updater.start_polling()
-        
-        # Wait for tasks
-        await asyncio.gather(server_task)
+    # Create and run bot
+    bot = TelegramGDriveBot()
     
     try:
-        asyncio.run(main())
+        bot.run()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     finally:
