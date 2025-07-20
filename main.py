@@ -32,6 +32,28 @@ if BOT_TOKEN and not BOT_TOKEN.replace(':', '').replace('-', '').replace('_', ''
     logger.error(f"Invalid BOT_TOKEN format. Token contains invalid characters.")
     BOT_TOKEN = None
 
+def test_credentials():
+    """Test Google Drive credentials"""
+    try:
+        import json
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        
+        credentials_info = json.loads(GOOGLE_CREDENTIALS)
+        credentials = service_account.Credentials.from_service_account_info(
+            credentials_info,
+            scopes=['https://www.googleapis.com/auth/drive.file']
+        )
+        service = build('drive', 'v3', credentials=credentials)
+        
+        # Test API call
+        results = service.files().list(pageSize=1).execute()
+        print("✅ Google Drive API connection successful!")
+        return True
+    except Exception as e:
+        print(f"❌ Google Drive API test failed: {e}")
+        return False
+
 class GoogleDriveManager:
     def __init__(self):
         self.service = None
@@ -317,30 +339,6 @@ class TelegramGDriveBot:
         logger.info("Starting Telegram Google Drive Bot...")
         self.app.run_polling()
 
-    def test_credentials():
-    try:
-        import json
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        
-        credentials_info = json.loads(GOOGLE_CREDENTIALS)
-        credentials = service_account.Credentials.from_service_account_info(
-            credentials_info,
-            scopes=['https://www.googleapis.com/auth/drive.file']
-        )
-        service = build('drive', 'v3', credentials=credentials)
-        
-        # Test API call
-        results = service.files().list(pageSize=1).execute()
-        print("✅ Google Drive API connection successful!")
-        return True
-    except Exception as e:
-        print(f"❌ Google Drive API test failed: {e}")
-        return False
-
-# Call before starting bot
-test_credentials()
-
 # Main execution
 if __name__ == "__main__":
     # Debug token
@@ -358,6 +356,12 @@ if __name__ == "__main__":
     
     if not GOOGLE_CREDENTIALS:
         logger.error("GOOGLE_CREDENTIALS not set! Please configure Google Drive API.")
+        exit(1)
+    
+    # Test credentials before starting bot
+    print("Testing Google Drive credentials...")
+    if not test_credentials():
+        logger.error("Google Drive credentials test failed!")
         exit(1)
     
     # Create and run bot
