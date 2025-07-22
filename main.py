@@ -82,7 +82,7 @@ class AlternativeMegaClient:
             return False
     
     def upload_file(self, file_path, filename):
-        """Simulated file upload"""
+        """Simulated file upload - synchronous version"""
         try:
             if not self.is_authenticated:
                 return None
@@ -90,9 +90,9 @@ class AlternativeMegaClient:
             file_size = os.path.getsize(file_path)
             logger.info(f"Processing upload: {filename}")
             
-            # Simulate upload time based on file size
+            # Simulate upload time based on file size (synchronous sleep)
             upload_time = min(file_size / (10 * 1024 * 1024), 10)  # Realistic upload time
-            await asyncio.sleep(upload_time) if asyncio.iscoroutinefunction(self.upload_file) else time.sleep(upload_time)
+            time.sleep(upload_time)
             
             # Generate mock file ID and link
             file_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
