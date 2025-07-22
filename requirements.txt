@@ -4,3 +4,4 @@ aiofiles==23.2.1
 mega.py==1.0.8
 requests==2.31.0
 asyncio==3.4.3
+pyrogram
